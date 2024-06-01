@@ -4,8 +4,9 @@ use std::{
     future::Future,
     io::{self, ErrorKind},
     net::SocketAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
+    collections::HashSet,
 };
 
 use log::{debug, error, info, trace, warn};
@@ -31,6 +32,7 @@ pub struct TcpServer {
     context: Arc<ServiceContext>,
     svr_cfg: ServerConfig,
     listener: ProxyListener,
+    connected_ips: Arc<Mutex<HashSet<std::net::IpAddr>>>,
 }
 
 impl TcpServer {
@@ -44,6 +46,7 @@ impl TcpServer {
             context,
             svr_cfg,
             listener,
+            connected_ips: Arc::new(Mutex::new(HashSet::new())),
         })
     }
 
@@ -92,6 +95,7 @@ impl TcpServer {
                 peer_addr,
                 stream: local_stream,
                 timeout: self.svr_cfg.timeout(),
+                connected_ips: self.connected_ips.clone(),
             };
 
             tokio::spawn(async move {
@@ -123,10 +127,12 @@ struct TcpServerClient {
     peer_addr: SocketAddr,
     stream: ProxyServerStream<MonProxyStream<TokioTcpStream>>,
     timeout: Option<Duration>,
+    connected_ips: Arc<Mutex<HashSet<std::net::IpAddr>>>,
 }
 
 impl TcpServerClient {
     async fn serve(mut self) -> io::Result<()> {
+
         // let target_addr = match Address::read_from(&mut self.stream).await {
         let target_addr = match timeout_fut(self.timeout, self.stream.handshake()).await {
             Ok(a) => a,
@@ -193,6 +199,13 @@ impl TcpServerClient {
             self.peer_addr,
             target_addr
         );
+
+        let peer_ip = self.peer_addr.ip();
+        {
+            let mut connected_ips = self.connected_ips.lock().unwrap();
+            connected_ips.insert(peer_ip);
+            println!("Клиент подключен: {}. Всего подключённых уникальных IP: {}", peer_ip, connected_ips.len());
+        }
 
         if self.context.check_outbound_blocked(&target_addr).await {
             error!(
@@ -277,6 +290,12 @@ impl TcpServerClient {
                     err
                 );
             }
+        }
+
+        {
+            let mut connected_ips = self.connected_ips.lock().unwrap();
+            connected_ips.remove(&peer_ip);
+            println!("Клиент отключён: {}. Всего подключённых уникальных IP: {}", peer_ip, connected_ips.len());
         }
 
         Ok(())
