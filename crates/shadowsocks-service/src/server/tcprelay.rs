@@ -254,7 +254,7 @@ impl TcpServerClient {
         }
         if first_connection {
             let connected_ips_count = self.connected_ips.lock().unwrap().len();
-            println!("{}:{}", self.server_port, connected_ips_count);
+            println!("Port {}:Connections {}", self.server_port, connected_ips_count);
         }
 
         let result = copy_encrypted_bidirectional(self.method, &mut self.stream, &mut remote_stream).await;
@@ -272,7 +272,7 @@ impl TcpServerClient {
         }
         if last_disconnection {
             let connected_ips_count = self.connected_ips.lock().unwrap().len();
-            println!("{}:{}", self.server_port, connected_ips_count);
+            println!("Port {}:Connections {}", self.server_port, connected_ips_count);
         }
 
         match result {
