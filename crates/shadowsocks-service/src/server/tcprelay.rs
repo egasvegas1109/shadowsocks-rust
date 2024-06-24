@@ -6,7 +6,7 @@ use std::{
     net::SocketAddr,
     sync::{Arc, Mutex},
     time::Duration,
-    collections::HashSet,
+    collections::HashMap,
 };
 
 use log::{debug, error, info, trace, warn};
@@ -32,7 +32,7 @@ pub struct TcpServer {
     context: Arc<ServiceContext>,
     svr_cfg: ServerConfig,
     listener: ProxyListener,
-    connected_ips: Arc<Mutex<HashSet<std::net::IpAddr>>>,
+    connected_ips: Arc<Mutex<HashMap<std::net::IpAddr, u32>>>,
 }
 
 impl TcpServer {
@@ -46,7 +46,7 @@ impl TcpServer {
             context,
             svr_cfg,
             listener,
-            connected_ips: Arc::new(Mutex::new(HashSet::new())),
+            connected_ips: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -127,115 +127,114 @@ struct TcpServerClient {
     peer_addr: SocketAddr,
     stream: ProxyServerStream<MonProxyStream<TokioTcpStream>>,
     timeout: Option<Duration>,
-    connected_ips: Arc<Mutex<HashSet<std::net::IpAddr>>>,
+    connected_ips: Arc<Mutex<HashMap<std::net::IpAddr, u32>>>,
 }
 
 impl TcpServerClient {
     async fn serve(mut self) -> io::Result<()> {
-
         // let target_addr = match Address::read_from(&mut self.stream).await {
-        let target_addr = match timeout_fut(self.timeout, self.stream.handshake()).await {
-            Ok(a) => a,
-            // Err(Socks5Error::IoError(ref err)) if err.kind() == ErrorKind::UnexpectedEof => {
-            //     debug!(
-            //         "handshake failed, received EOF before a complete target Address, peer: {}",
-            //         self.peer_addr
-            //     );
-            //     return Ok(());
-            // }
-            Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
-                debug!(
-                    "tcp handshake failed, received EOF before a complete target Address, peer: {}",
-                    self.peer_addr
-                );
-                return Ok(());
-            }
-            Err(err) if err.kind() == ErrorKind::TimedOut => {
-                debug!(
-                    "tcp handshake failed, timeout before a complete target Address, peer: {}",
-                    self.peer_addr
-                );
-                return Ok(());
-            }
-            Err(err) => {
-                // https://github.com/shadowsocks/shadowsocks-rust/issues/292
-                //
-                // Keep connection open. Except AEAD-2022
-                warn!("tcp handshake failed. peer: {}, {}", self.peer_addr, err);
-
-                #[cfg(feature = "aead-cipher-2022")]
-                if self.method.is_aead_2022() {
-                    // Set SO_LINGER(0) for misbehave clients, which will eventually receive RST. (ECONNRESET)
-                    // This will also prevent the socket entering TIME_WAIT state.
-
-                    let stream = self.stream.into_inner().into_inner();
-                    let _ = stream.set_linger(Some(Duration::ZERO));
-
+            let target_addr = match timeout_fut(self.timeout, self.stream.handshake()).await {
+                Ok(a) => a,
+                // Err(Socks5Error::IoError(ref err)) if err.kind() == ErrorKind::UnexpectedEof => {
+                //     debug!(
+                //         "handshake failed, received EOF before a complete target Address, peer: {}",
+                //         self.peer_addr
+                //     );
+                //     return Ok(());
+                // }
+                Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
+                    debug!(
+                        "tcp handshake failed, received EOF before a complete target Address, peer: {}",
+                        self.peer_addr
+                    );
                     return Ok(());
                 }
-
-                debug!("tcp silent-drop peer: {}", self.peer_addr);
-
-                // Unwrap and get the plain stream.
-                // Otherwise it will keep reporting decryption error before reaching EOF.
-                //
-                // Note: This will drop all data in the decryption buffer, which is no going back.
-                let mut stream = self.stream.into_inner();
-
-                let res = ignore_until_end(&mut stream).await;
-
-                trace!(
-                    "tcp silent-drop peer: {} is now closing with result {:?}",
-                    self.peer_addr,
-                    res
+                Err(err) if err.kind() == ErrorKind::TimedOut => {
+                    debug!(
+                        "tcp handshake failed, timeout before a complete target Address, peer: {}",
+                        self.peer_addr
+                    );
+                    return Ok(());
+                }
+                Err(err) => {
+                    // https://github.com/shadowsocks/shadowsocks-rust/issues/292
+                    //
+                    // Keep connection open. Except AEAD-2022
+                    warn!("tcp handshake failed. peer: {}, {}", self.peer_addr, err);
+    
+                    #[cfg(feature = "aead-cipher-2022")]
+                    if self.method.is_aead_2022() {
+                        // Set SO_LINGER(0) for misbehave clients, which will eventually receive RST. (ECONNRESET)
+                        // This will also prevent the socket entering TIME_WAIT state.
+    
+                        let stream = self.stream.into_inner().into_inner();
+                        let _ = stream.set_linger(Some(Duration::ZERO));
+    
+                        return Ok(());
+                    }
+    
+                    debug!("tcp silent-drop peer: {}", self.peer_addr);
+    
+                    // Unwrap and get the plain stream.
+                    // Otherwise it will keep reporting decryption error before reaching EOF.
+                    //
+                    // Note: This will drop all data in the decryption buffer, which is no going back.
+                    let mut stream = self.stream.into_inner();
+    
+                    let res = ignore_until_end(&mut stream).await;
+    
+                    trace!(
+                        "tcp silent-drop peer: {} is now closing with result {:?}",
+                        self.peer_addr,
+                        res
+                    );
+    
+                    return Ok(());
+                }
+            };
+    
+            trace!(
+                "accepted tcp client connection {}, establishing tunnel to {}",
+                self.peer_addr,
+                target_addr
+            );
+    
+            let peer_ip = self.peer_addr.ip();
+            {
+                let mut connected_ips = self.connected_ips.lock().unwrap();
+                let counter = connected_ips.entry(peer_ip).or_insert(0);
+                *counter += 1;
+                println!("Клиент подключен: {}. Всего подключённых уникальных IP: {}", peer_ip, connected_ips.len());
+            }
+    
+            if self.context.check_outbound_blocked(&target_addr).await {
+                error!(
+                    "tcp client {} outbound {} blocked by ACL rules",
+                    self.peer_addr, target_addr
                 );
-
                 return Ok(());
             }
-        };
-
-        trace!(
-            "accepted tcp client connection {}, establishing tunnel to {}",
-            self.peer_addr,
-            target_addr
-        );
-
-        let peer_ip = self.peer_addr.ip();
-        {
-            let mut connected_ips = self.connected_ips.lock().unwrap();
-            connected_ips.insert(peer_ip);
-            println!("Клиент подключен: {}. Всего подключённых уникальных IP: {}", peer_ip, connected_ips.len());
-        }
-
-        if self.context.check_outbound_blocked(&target_addr).await {
-            error!(
-                "tcp client {} outbound {} blocked by ACL rules",
-                self.peer_addr, target_addr
-            );
-            return Ok(());
-        }
-
-        let mut remote_stream = match timeout_fut(
-            self.timeout,
-            OutboundTcpStream::connect_remote_with_opts(
-                self.context.context_ref(),
-                &target_addr,
-                self.context.connect_opts_ref(),
-            ),
-        )
-        .await
-        {
-            Ok(s) => s,
-            Err(err) => {
-                error!(
-                    "tcp tunnel {} -> {} connect failed, error: {}",
-                    self.peer_addr, target_addr, err
-                );
-                return Err(err);
-            }
-        };
-
-        // https://github.com/shadowsocks/shadowsocks-rust/issues/232
+    
+            let mut remote_stream = match timeout_fut(
+                self.timeout,
+                OutboundTcpStream::connect_remote_with_opts(
+                    self.context.context_ref(),
+                    &target_addr,
+                    self.context.connect_opts_ref(),
+                ),
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(err) => {
+                    error!(
+                        "tcp tunnel {} -> {} connect failed, error: {}",
+                        self.peer_addr, target_addr, err
+                    );
+                    return Err(err);
+                }
+            };
+            // https://github.com/shadowsocks/shadowsocks-rust/issues/232
         //
         // Protocols like FTP, clients will wait for servers to send Welcome Message without sending anything.
         //
@@ -294,7 +293,13 @@ impl TcpServerClient {
 
         {
             let mut connected_ips = self.connected_ips.lock().unwrap();
-            connected_ips.remove(&peer_ip);
+            if let Some(counter) = connected_ips.get_mut(&peer_ip) {
+                if *counter > 1 {
+                    *counter -= 1;
+                } else {
+                    connected_ips.remove(&peer_ip);
+                }
+            }
             println!("Клиент отключён: {}. Всего подключённых уникальных IP: {}", peer_ip, connected_ips.len());
         }
 
