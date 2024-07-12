@@ -142,21 +142,21 @@ impl TcpServerClient {
         let target_addr = match timeout_fut(self.timeout, self.stream.handshake()).await {
             Ok(a) => a,
             Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
-                debug!(
-                    "TCP рукопожатие не удалось, получен EOF до полного адреса назначения, peer: {}",
-                    self.peer_addr
-                );
+                // debug!(
+                //     "TCP рукопожатие не удалось, получен EOF до полного адреса назначения, peer: {}",
+                //     self.peer_addr
+                // );
                 return Ok(());
             }
             Err(err) if err.kind() == ErrorKind::TimedOut => {
-                debug!(
-                    "TCP рукопожатие не удалось, тайм-аут до полного адреса назначения, peer: {}",
-                    self.peer_addr
-                );
+                // debug!(
+                //     "TCP рукопожатие не удалось, тайм-аут до полного адреса назначения, peer: {}",
+                //     self.peer_addr
+                // );
                 return Ok(());
             }
-            Err(err) => {
-                warn!("TCP рукопожатие не удалось. peer: {}, {}", self.peer_addr, err);
+            Err(_err) => {
+                // warn!("TCP рукопожатие не удалось. peer: {}, {}", self.peer_addr, err);
 
                 #[cfg(feature = "aead-cipher-2022")]
                 if self.method.is_aead_2022() {
@@ -206,10 +206,10 @@ impl TcpServerClient {
         {
             Ok(s) => s,
             Err(err) => {
-                error!(
-                    "TCP туннель {} -> {} подключение не удалось, ошибка: {}",
-                    self.peer_addr, target_addr, err
-                );
+                // error!(
+                //     "TCP туннель {} -> {} подключение не удалось, ошибка: {}",
+                //     self.peer_addr, target_addr, err
+                // );
                 return Err(err);
             }
         };
